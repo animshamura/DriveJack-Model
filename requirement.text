@@ -1,0 +1,8 @@
+fastapi
+torch
+pyngrok
+uvicorn
+nest_asyncio
+numpy
+random
+pydantic
