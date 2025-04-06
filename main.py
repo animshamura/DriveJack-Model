@@ -1,28 +1,29 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-import nest_asyncio
-import torch
-import numpy as np
-import random
-import uvicorn
-from pydantic import BaseModel
-from fastapi import Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import nest_asyncio
+import requests
+from io import BytesIO
+from PIL import Image
+import numpy as np
+import torch
+import uvicorn
 import os
 
-# Apply nest_asyncio
+# Apply for async compatibility
 nest_asyncio.apply()
 
-# FastAPI app
+# Initialize app
 app = FastAPI()
 
-# CORS settings
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows specified origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Response model
@@ -32,47 +33,62 @@ class TrafficResponse(BaseModel):
     traffic_jam: bool
     road_status: str
 
-# Load YOLOv5 model
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+# Load YOLOv5
+model = torch.hub.load('ultralytics/yolov5', 'yolov5s', trust_repo=True)
 
-# Simulate satellite image fetching
+# NOAA satellite image fetcher
 def fetch_satellite_image(area_name: str):
-    print(f"Fetching satellite image for: {area_name}")
-    return f"mocked_image_data_for_{area_name}"
+    image_url = "https://cdn.star.nesdis.noaa.gov/GOES18/ABI/CONUS/GEOCOLOR/1000x1000.jpg"
+    print(f"Fetching NOAA image for: {area_name}")
+    try:
+        response = requests.get(image_url, timeout=10)
+        response.raise_for_status()
+        image = Image.open(BytesIO(response.content)).convert("RGB")
+        image = image.resize((640, 640))
+        return np.array(image)
+    except Exception as e:
+        print(f"Error fetching image: {e}")
+        return np.ones((640, 640, 3), dtype=np.uint8)
 
-# Simulated image processing
-def process_image(image_data):
-    image = np.ones((640, 640, 3), dtype=np.uint8)  # Dummy white image
-    return image
-
-# YOLO detection
+# Detection logic
 def run_yolo_detection(image_data):
-    image = process_image(image_data)
-    results = model(image)
-    vehicle_count = sum([1 for conf, label in zip(results.xywh[0][:, 4], results.xywh[0][:, 5]) if label == 2])
-    jam = vehicle_count > 30
-    road_status = random.choice(["clear", "blocked", "construction"])
+    results = model(image_data)
+
+    # Label 2 is 'car' in YOLOv5
+    vehicle_count = sum([
+        1 for conf, label in zip(results.xywh[0][:, 4], results.xywh[0][:, 5]) if int(label) == 2
+    ])
+
+    traffic_jam = vehicle_count >= 30
+
+    # Deterministic road status logic
+    if vehicle_count < 10:
+        road_status = "clear"
+    elif vehicle_count < 30:
+        road_status = "busy"
+    else:
+        road_status = "traffic jam"
+
     return {
         "vehicle_count": vehicle_count,
-        "traffic_jam": jam,
+        "traffic_jam": traffic_jam,
         "road_status": road_status
     }
 
-# API endpoint
+# Endpoint
 @app.get("/analyze", response_model=TrafficResponse)
 def analyze_area(area: str = Query(..., description="Area name in Dhaka")):
     image_data = fetch_satellite_image(area)
     detection = run_yolo_detection(image_data)
-    data = {
+    return JSONResponse(content={
         "area": area,
         "vehicle_count": detection["vehicle_count"],
         "traffic_jam": detection["traffic_jam"],
         "road_status": detection["road_status"]
-    }
-    return JSONResponse(content=data)
+    })
 
-# Run app with Uvicorn (or any other ASGI server like Gunicorn in production)
+# Run server
 if __name__ == "__main__":
-    host = os.getenv("HOST", "0.0.0.0")  # Host is 0.0.0.0 for any IP
-    port = int(os.getenv("PORT", 8000))  # Default port is 8000, can be set via env variables
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host=host, port=port)
